@@ -5,6 +5,7 @@ import threading
 import numpy as np
 import time
 import os
+import queue
 
 class SerialReader(DataProvider):
     def __init__(self, port='COM12', baudrate=230400, samples_per_update=100, viewer=None):
@@ -12,13 +13,18 @@ class SerialReader(DataProvider):
         self.port = port
         self.baudrate = baudrate
         self.samples_per_update = samples_per_update
+        self.viewer = viewer
+
         self.ser = None
         self.running = False
         self.thread = None
         self.buffer_ch1 = []
-        self.viewer = viewer
+
+        # Grabación
         self.csv_file = None
-        self.file_path = None
+        self.write_queue = queue.Queue()
+        self.writer_thread = None
+        self.writer_running = False
 
     def start(self):
         try:
@@ -33,34 +39,7 @@ class SerialReader(DataProvider):
         self.running = False
         if self.ser and self.ser.is_open:
             self.ser.close()
-        if self.csv_file:
-            self.csv_file.close()
-            self.csv_file = None
-
-    def start_recording(self):
-        if not self.viewer:
-            return
-        if not self.csv_file:
-            try:
-                self.file_path = os.path.join(
-                    self.viewer.output_folder,
-                    self.viewer.filename_input.text() + ".csv"
-                )
-                self.csv_file = open(self.file_path, "w")
-                self.csv_file.write(f"# sample_rate: {self.viewer.sample_rate}\n")
-                self.csv_file.write("valor\n")
-                print(f"[SerialReader] Grabación iniciada en: {self.file_path}")
-            except Exception as e:
-                print(f"[SerialReader] ❌ Error al abrir archivo para grabación: {e}")
-
-    def stop_recording(self):
-        if self.csv_file:
-            try:
-                self.csv_file.close()
-                print(f"[SerialReader] Grabación cerrada: {self.file_path}")
-            except Exception as e:
-                print(f"[SerialReader] ❌ Error al cerrar archivo: {e}")
-            self.csv_file = None
+        self.stop_recording()
 
     def run(self):
         input_buffer = []
@@ -89,12 +68,9 @@ class SerialReader(DataProvider):
                                 chunk = np.array(self.buffer_ch1[-chunk_size:])
                                 filtered = self.apply_filters(chunk)
 
-                                if self.viewer.recording_enabled and self.csv_file:
-                                    try:
-                                        for val in filtered[-self.samples_per_update:]:
-                                            self.csv_file.write(f"{val}\n")
-                                    except Exception as e:
-                                        print(f"[SerialReader] ❌ Error escribiendo en CSV: {e}")
+                                if self.writer_running:
+                                    for val in filtered[-self.samples_per_update:]:
+                                        self.write_queue.put(f"{val}\n")
 
                                 self.new_data.emit(filtered[-self.samples_per_update:], None)
                                 del self.buffer_ch1[:self.samples_per_update]
@@ -107,6 +83,7 @@ class SerialReader(DataProvider):
             return data
 
         fs = self.viewer.sample_rate
+
         try:
             if self.viewer.center_signal.isChecked():
                 data = data - np.mean(data)
@@ -127,3 +104,52 @@ class SerialReader(DataProvider):
             print(f"[SerialReader] Error aplicando filtros: {e}")
 
         return data
+
+    def start_recording(self):
+        if self.writer_running:
+            return
+
+        path = os.path.join(
+            self.viewer.output_folder,
+            self.viewer.filename_input.text() + ".csv"
+        )
+
+        try:
+            self.csv_file = open(path, "w", buffering=1)  # línea por línea
+            self.csv_file.write(f"# sample_rate: {self.viewer.sample_rate}\n")
+            self.csv_file.write("valor\n")
+
+            self.writer_running = True
+            self.writer_thread = threading.Thread(target=self._write_loop, daemon=True)
+            self.writer_thread.start()
+
+            print(f"[SerialReader] Grabación iniciada en {path}")
+        except Exception as e:
+            print(f"[SerialReader] Error iniciando grabación: {e}")
+
+    def _write_loop(self):
+        try:
+            while self.writer_running:
+                try:
+                    line = self.write_queue.get(timeout=0.5)
+                    if self.csv_file:
+                        self.csv_file.write(line)
+                except queue.Empty:
+                    continue
+        except Exception as e:
+            print(f"[SerialReader] Error en hilo de escritura: {e}")
+
+    def stop_recording(self):
+        if not self.writer_running:
+            return
+
+        print("[SerialReader] Deteniendo grabación...")
+        self.writer_running = False
+
+        if self.writer_thread:
+            self.writer_thread.join(timeout=2)
+
+        if self.csv_file:
+            self.csv_file.close()
+            self.csv_file = None
+        print("[SerialReader] Grabación detenida")

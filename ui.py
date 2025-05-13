@@ -1,6 +1,7 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QDoubleSpinBox, QSpinBox,
-    QLabel, QGroupBox, QFormLayout, QComboBox, QCheckBox, QFileDialog, QLineEdit, QMessageBox
+    QLabel, QGroupBox, QFormLayout, QComboBox, QCheckBox, QFileDialog,
+    QLineEdit, QMessageBox
 )
 from PyQt5.QtCore import QTimer, pyqtSignal
 import pyqtgraph as pg
@@ -27,7 +28,7 @@ class SignalViewer(QWidget):
         self.active_filter = 'custom'
         self.last_selected_port = None
 
-        self.output_folder = ""
+        self.output_folder = os.getcwd()  # carpeta por defecto
         self.recording_enabled = False
 
         self.init_ui()
@@ -39,14 +40,12 @@ class SignalViewer(QWidget):
         self._last_ports = []
 
     def init_ui(self):
-        # === PLOT ===
         self.plot_widget = pg.GraphicsLayoutWidget()
         self.plot1 = self.plot_widget.addPlot(title="Señal (Canal Único)")
         self.plot1.setLabel('bottom', 'Tiempo', units='ms')
         self.curve1 = self.plot1.plot(self.time_axis, self.data_ch1, pen='c')
         self.plot1.setMouseEnabled(x=True, y=True)
 
-        # === BOTONES DE CONTROL PRINCIPAL ===
         self.port_combo = QComboBox()
         self.port_combo.currentIndexChanged.connect(self.save_selected_port)
         self.refresh_button = QPushButton("Actualizar Puertos")
@@ -60,18 +59,17 @@ class SignalViewer(QWidget):
         self.auto_button.clicked.connect(self.autoscale_y)
         self.exit_button.clicked.connect(self.close)
 
-        # === CONTROLES DE SEÑAL ===
         self.y_min = QDoubleSpinBox(); self.y_min.setRange(-10000, 0); self.y_min.setValue(-3000)
         self.y_max = QDoubleSpinBox(); self.y_max.setRange(0, 10000); self.y_max.setValue(7000)
         self.x_ms = QDoubleSpinBox(); self.x_ms.setRange(50, 10000); self.x_ms.setValue(1000)
         self.gain = QDoubleSpinBox(); self.gain.setRange(0.1, 10.0); self.gain.setValue(1.0)
         self.center_signal = QCheckBox("Restar media (centrar señal)")
         self.center_signal.setChecked(False)
+
         self.y_min.valueChanged.connect(self.update_y_range)
         self.y_max.valueChanged.connect(self.update_y_range)
         self.x_ms.valueChanged.connect(self.update_x_range)
 
-        # === FILTROS ===
         self.enable_butter = QCheckBox("Activar Bandpass Butter")
         self.butter_lowcut = QDoubleSpinBox(); self.butter_lowcut.setRange(0.1, 5000); self.butter_lowcut.setValue(20)
         self.butter_highcut = QDoubleSpinBox(); self.butter_highcut.setRange(1, 5000); self.butter_highcut.setValue(450)
@@ -82,18 +80,17 @@ class SignalViewer(QWidget):
         self.notch_q = QDoubleSpinBox(); self.notch_q.setRange(1, 100); self.notch_q.setValue(30)
         self.notch_harmonics = QSpinBox(); self.notch_harmonics.setRange(1, 5); self.notch_harmonics.setValue(3)
 
-        self.chunk_size = QSpinBox(); self.chunk_size.setRange(100, 100000); self.chunk_size.setValue(10000)
+        self.chunk_size = QSpinBox(); self.chunk_size.setRange(100, 100000); self.chunk_size.setValue(1000)
 
-        # === CONTROLES DE GRABACIÓN ===
         self.filename_input = QLineEdit()
-        self.folder_display = QLineEdit(); self.folder_display.setReadOnly(True); self.folder_display.setMaximumWidth(300)
+        self.folder_display = QLineEdit(); self.folder_display.setReadOnly(True); self.folder_display.setMaximumWidth(280)
+        self.folder_display.setText(self.output_folder)
         self.folder_button = QPushButton("Examinar...")
         self.record_button = QPushButton("Iniciar grabación")
 
         self.folder_button.clicked.connect(self.select_output_folder)
         self.record_button.clicked.connect(self.toggle_recording)
 
-        # === LAYOUTS ===
         top_controls = QHBoxLayout()
         top_controls.addWidget(QLabel("Puerto:"))
         top_controls.addWidget(self.port_combo)
@@ -125,7 +122,7 @@ class SignalViewer(QWidget):
         notch_controls.addRow("Armónicos", self.notch_harmonics)
 
         general_controls = QFormLayout()
-        general_controls.addRow(QLabel("<b>Parámetros Generales:</b>"))
+        general_controls.addRow(QLabel("<b>Grabación:</b>"))
         general_controls.addRow("Archivo", self.filename_input)
         general_controls.addRow("Carpeta", self.folder_display)
         general_controls.addRow(" ", self.folder_button)
@@ -156,6 +153,9 @@ class SignalViewer(QWidget):
         self.update_y_range()
 
     def select_output_folder(self):
+        if self.recording_enabled:
+            QMessageBox.warning(self, "Grabación en curso", "No puedes cambiar la carpeta mientras grabas.")
+            return
         folder = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta para guardar")
         if folder:
             self.output_folder = folder
@@ -173,15 +173,22 @@ class SignalViewer(QWidget):
                     QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
                 if reply == QMessageBox.No:
                     return
+
             self.recording_enabled = True
             self.record_button.setText("Detener grabación")
             self.status_label.setText("Grabando...")
+            self.folder_button.setEnabled(False)
+            self.filename_input.setReadOnly(True)
+
             if self.reader and self.reader.running:
                 self.reader.start_recording()
         else:
             self.recording_enabled = False
             self.record_button.setText("Iniciar grabación")
             self.status_label.setText("Grabación detenida")
+            self.folder_button.setEnabled(True)
+            self.filename_input.setReadOnly(False)
+
             if self.reader:
                 self.reader.stop_recording()
 
@@ -212,11 +219,18 @@ class SignalViewer(QWidget):
             self.start_button.setText("Pausar")
         else:
             if self.reader:
+                if self.recording_enabled:
+                    self.recording_enabled = False
+                    self.record_button.setText("Iniciar grabación")
+                    self.status_label.setText("Grabación detenida")
+                    self.folder_button.setEnabled(True)
+                    self.filename_input.setReadOnly(False)
+                    self.reader.stop_recording()
+
                 self.reader.stop()
                 self.reader = None
             self.start_button.setText("Iniciar")
-            self.recording_enabled = False
-            self.record_button.setText("Iniciar grabación")
+
         self.running = not self.running
 
     def update_y_range(self):
@@ -253,5 +267,7 @@ class SignalViewer(QWidget):
         print("Cerrando app correctamente...")
         self.running = False
         if self.reader:
+            if self.recording_enabled:
+                self.reader.stop_recording()
             self.reader.stop()
         event.accept()
