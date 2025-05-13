@@ -1,13 +1,13 @@
-# ... (importaciones no cambiaron)
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QDoubleSpinBox, QSpinBox,
-    QLabel, QGroupBox, QFormLayout, QComboBox, QCheckBox
+    QLabel, QGroupBox, QFormLayout, QComboBox, QCheckBox, QFileDialog, QLineEdit, QMessageBox
 )
 from PyQt5.QtCore import QTimer, pyqtSignal
 import pyqtgraph as pg
 import numpy as np
 import serial.tools.list_ports
 from PyQt5.QtGui import QIcon
+import os
 
 class SignalViewer(QWidget):
     start_requested = pyqtSignal()
@@ -26,6 +26,9 @@ class SignalViewer(QWidget):
 
         self.active_filter = 'custom'
         self.last_selected_port = None
+
+        self.output_folder = ""
+        self.recording_enabled = False
 
         self.init_ui()
         self.update_ports()
@@ -62,29 +65,33 @@ class SignalViewer(QWidget):
         self.y_max = QDoubleSpinBox(); self.y_max.setRange(0, 10000); self.y_max.setValue(7000)
         self.x_ms = QDoubleSpinBox(); self.x_ms.setRange(50, 10000); self.x_ms.setValue(1000)
         self.gain = QDoubleSpinBox(); self.gain.setRange(0.1, 10.0); self.gain.setValue(1.0)
-
-        # ✅ NUEVO: Restar media
         self.center_signal = QCheckBox("Restar media (centrar señal)")
         self.center_signal.setChecked(False)
-
         self.y_min.valueChanged.connect(self.update_y_range)
         self.y_max.valueChanged.connect(self.update_y_range)
         self.x_ms.valueChanged.connect(self.update_x_range)
 
-        # === FILTRO BUTTERWORTH ===
+        # === FILTROS ===
         self.enable_butter = QCheckBox("Activar Bandpass Butter")
         self.butter_lowcut = QDoubleSpinBox(); self.butter_lowcut.setRange(0.1, 5000); self.butter_lowcut.setValue(20)
         self.butter_highcut = QDoubleSpinBox(); self.butter_highcut.setRange(1, 5000); self.butter_highcut.setValue(450)
         self.butter_order = QSpinBox(); self.butter_order.setRange(1, 10); self.butter_order.setValue(2)
 
-        # === FILTRO NOTCH ===
         self.enable_notch = QCheckBox("Activar Notch")
         self.notch_freq = QDoubleSpinBox(); self.notch_freq.setRange(10, 100); self.notch_freq.setValue(60)
         self.notch_q = QDoubleSpinBox(); self.notch_q.setRange(1, 100); self.notch_q.setValue(30)
         self.notch_harmonics = QSpinBox(); self.notch_harmonics.setRange(1, 5); self.notch_harmonics.setValue(3)
 
-        # === CHUNK SIZE PARA FILTRADO ===
         self.chunk_size = QSpinBox(); self.chunk_size.setRange(100, 100000); self.chunk_size.setValue(10000)
+
+        # === CONTROLES DE GRABACIÓN ===
+        self.filename_input = QLineEdit()
+        self.folder_display = QLineEdit(); self.folder_display.setReadOnly(True); self.folder_display.setMaximumWidth(300)
+        self.folder_button = QPushButton("Examinar...")
+        self.record_button = QPushButton("Iniciar grabación")
+
+        self.folder_button.clicked.connect(self.select_output_folder)
+        self.record_button.clicked.connect(self.toggle_recording)
 
         # === LAYOUTS ===
         top_controls = QHBoxLayout()
@@ -103,7 +110,7 @@ class SignalViewer(QWidget):
         signal_controls.addRow("Y Máx", self.y_max)
         signal_controls.addRow("Ventana (ms)", self.x_ms)
         signal_controls.addRow("Ganancia", self.gain)
-        signal_controls.addRow(self.center_signal)  # ✅ Agregado aquí
+        signal_controls.addRow(self.center_signal)
 
         butter_controls = QFormLayout()
         butter_controls.addRow(self.enable_butter)
@@ -119,6 +126,10 @@ class SignalViewer(QWidget):
 
         general_controls = QFormLayout()
         general_controls.addRow(QLabel("<b>Parámetros Generales:</b>"))
+        general_controls.addRow("Archivo", self.filename_input)
+        general_controls.addRow("Carpeta", self.folder_display)
+        general_controls.addRow(" ", self.folder_button)
+        general_controls.addRow(" ", self.record_button)
         general_controls.addRow("Chunk Size", self.chunk_size)
 
         group1 = QGroupBox("Visualización")
@@ -144,23 +155,49 @@ class SignalViewer(QWidget):
 
         self.update_y_range()
 
+    def select_output_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta para guardar")
+        if folder:
+            self.output_folder = folder
+            self.folder_display.setText(folder)
+
+    def toggle_recording(self):
+        if not self.recording_enabled:
+            if not self.output_folder or not self.filename_input.text():
+                self.status_label.setText("Falta carpeta o nombre de archivo")
+                return
+            full_path = os.path.join(self.output_folder, self.filename_input.text() + ".csv")
+            if os.path.exists(full_path):
+                reply = QMessageBox.question(self, 'Archivo existente',
+                    f"El archivo {full_path} ya existe. ¿Deseas sobrescribirlo?",
+                    QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if reply == QMessageBox.No:
+                    return
+            self.recording_enabled = True
+            self.record_button.setText("Detener grabación")
+            self.status_label.setText("Grabando...")
+            if self.reader and self.reader.running:
+                self.reader.start_recording()
+        else:
+            self.recording_enabled = False
+            self.record_button.setText("Iniciar grabación")
+            self.status_label.setText("Grabación detenida")
+            if self.reader:
+                self.reader.stop_recording()
+
     def save_selected_port(self):
         self.last_selected_port = self.port_combo.currentText()
 
     def update_ports(self):
         selected = self.port_combo.currentText()
-    
         ports = [p.device for p in serial.tools.list_ports.comports()]
         self.port_combo.clear()
         self.port_combo.addItems(ports)
-
-        # Usar la selección activa real si sigue disponible
         if selected in ports:
             self.port_combo.setCurrentText(selected)
-            self.last_selected_port = selected  # 🔁 Asegurar persistencia
+            self.last_selected_port = selected
         else:
             self.last_selected_port = None
-
         self._last_ports = ports
 
     def check_ports_update(self):
@@ -178,6 +215,8 @@ class SignalViewer(QWidget):
                 self.reader.stop()
                 self.reader = None
             self.start_button.setText("Iniciar")
+            self.recording_enabled = False
+            self.record_button.setText("Iniciar grabación")
         self.running = not self.running
 
     def update_y_range(self):
@@ -186,13 +225,10 @@ class SignalViewer(QWidget):
     def update_x_range(self):
         ms = self.x_ms.value()
         samples = int((ms / 1000) * self.sample_rate)
-
         if samples > len(self.data_ch1):
             self.data_ch1 = np.pad(self.data_ch1, (samples - len(self.data_ch1), 0), constant_values=0)
-
         y = self.data_ch1[-samples:]
         x = np.linspace(-samples / self.sample_rate * 1000, 0, samples)
-
         if len(x) == len(y) and len(x) > 1:
             self.curve1.setData(x, y)
 
